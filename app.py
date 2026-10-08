@@ -1,7 +1,9 @@
+
 import streamlit as st
 import pandas as pd
 import numpy as np
 import joblib
+
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 
 
@@ -17,26 +19,102 @@ st.set_page_config(
 
 
 # =========================================================
+# VARIABLES DEL MODELO
+# =========================================================
+
+variables_modelo = [
+    "Relative_Compactness",
+    "Surface_Area",
+    "Wall_Area",
+    "Overall_Height",
+    "Glazing_Area"
+]
+
+
+# =========================================================
 # CARGAR MODELOS
 # =========================================================
 
 @st.cache_resource
 def cargar_modelos():
-
     scaler = joblib.load("minmax_scaler.pkl")
+    modelo_heating = joblib.load("svm_heating.pkl")
+    modelo_cooling = joblib.load("red_neuronal_cooling.pkl")
 
-    modelo_heating = joblib.load(
-        "svm_heating.pkl"
-    )
-
-    modelo_cooling = joblib.load(
-        "red_neuronal_cooling.pkl"
-    )
+    # Comprobar el número de variables esperado
+    if hasattr(scaler, "n_features_in_"):
+        if scaler.n_features_in_ != len(variables_modelo):
+            raise ValueError(
+                "El escalador no fue configurado con las "
+                "cinco variables esperadas."
+            )
 
     return scaler, modelo_heating, modelo_cooling
 
 
-scaler, modelo_heating, modelo_cooling = cargar_modelos()
+try:
+    scaler, modelo_heating, modelo_cooling = cargar_modelos()
+
+except (FileNotFoundError, OSError, ValueError) as e:
+    st.error(f"No se pudieron cargar los modelos: {e}")
+    st.stop()
+
+
+# =========================================================
+# FUNCIONES AUXILIARES
+# =========================================================
+
+def preparar_datos(datos):
+    """Selecciona las variables y convierte sus valores a números."""
+
+    X = datos[variables_modelo].copy()
+
+    for columna in variables_modelo:
+        X[columna] = pd.to_numeric(
+            X[columna],
+            errors="coerce"
+        )
+
+    # Los infinitos también se consideran valores inválidos
+    X = X.replace([np.inf, -np.inf], np.nan)
+
+    return X
+
+
+def calcular_metricas(valores_reales, predicciones):
+    """Calcula MAE y RMSE excluyendo valores reales inválidos."""
+
+    reales = pd.to_numeric(
+        valores_reales,
+        errors="coerce"
+    ).to_numpy(dtype=float)
+
+    predicciones = np.asarray(
+        predicciones,
+        dtype=float
+    )
+
+    mascara = np.isfinite(reales) & np.isfinite(predicciones)
+
+    if not mascara.any():
+        return None
+
+    reales_validos = reales[mascara]
+    predicciones_validas = predicciones[mascara]
+
+    mae = mean_absolute_error(
+        reales_validos,
+        predicciones_validas
+    )
+
+    rmse = np.sqrt(
+        mean_squared_error(
+            reales_validos,
+            predicciones_validas
+        )
+    )
+
+    return mae, rmse, int(mascara.sum())
 
 
 # =========================================================
@@ -53,22 +131,9 @@ st.write(
 
 st.info(
     "El archivo puede contener muchas columnas. "
-    "El modelo utilizará únicamente las variables necesarias "
-    "para realizar la predicción."
+    "El modelo utilizará únicamente las cinco variables "
+    "necesarias para realizar las predicciones."
 )
-
-
-# =========================================================
-# VARIABLES QUE UTILIZA EL MODELO
-# =========================================================
-
-variables_modelo = [
-    "Relative_Compactness",
-    "Surface_Area",
-    "Wall_Area",
-    "Overall_Height",
-    "Glazing_Area"
-]
 
 
 # =========================================================
@@ -85,480 +150,332 @@ archivo = st.file_uploader(
 
 if archivo is not None:
 
+    # -----------------------------------------------------
+    # LEER ARCHIVO
+    # -----------------------------------------------------
+
     try:
-
-        # -------------------------------------------------
-        # LEER CSV
-        # -------------------------------------------------
-
         if archivo.name.lower().endswith(".csv"):
-
             datos = pd.read_csv(archivo)
-
-        # -------------------------------------------------
-        # LEER EXCEL
-        # -------------------------------------------------
-
         else:
-
             datos = pd.read_excel(archivo)
-
-
-        # -------------------------------------------------
-        # MENSAJE DE ÉXITO
-        # -------------------------------------------------
 
         st.success(
             f"Archivo '{archivo.name}' cargado correctamente."
         )
 
+    except Exception as e:
+        st.error(
+            f"No se pudo leer el archivo. "
+            f"Compruebe su formato. Detalle: {e}"
+        )
+        st.stop()
 
-        # =================================================
-        # INFORMACIÓN DEL ARCHIVO
-        # =================================================
+    # -----------------------------------------------------
+    # INFORMACIÓN DEL ARCHIVO
+    # -----------------------------------------------------
 
-        st.subheader("📋 Datos cargados")
+    st.subheader("📋 Datos cargados")
 
-        col1, col2, col3 = st.columns(3)
+    col1, col2, col3 = st.columns(3)
 
-        with col1:
+    col1.metric("Registros", datos.shape[0])
+    col2.metric("Columnas", datos.shape[1])
+    col3.metric(
+        "Valores faltantes",
+        int(datos.isnull().sum().sum())
+    )
 
-            st.metric(
-                "Registros",
-                datos.shape[0]
-            )
+    st.dataframe(
+        datos,
+        use_container_width=True
+    )
 
-        with col2:
+    # -----------------------------------------------------
+    # VALIDAR COLUMNAS
+    # -----------------------------------------------------
 
-            st.metric(
-                "Columnas",
-                datos.shape[1]
-            )
+    st.subheader("🔎 Verificación de variables")
 
-        with col3:
+    faltantes = [
+        variable
+        for variable in variables_modelo
+        if variable not in datos.columns
+    ]
 
-            st.metric(
-                "Valores faltantes",
-                int(datos.isnull().sum().sum())
-            )
+    if faltantes:
 
-
-        # -------------------------------------------------
-        # MOSTRAR DATASET
-        # -------------------------------------------------
-
-        st.dataframe(
-            datos,
-            use_container_width=True
+        st.error(
+            "El archivo no contiene todas las variables "
+            "necesarias para realizar la predicción."
         )
 
+        st.write("Variables faltantes:")
 
-        # =================================================
-        # VERIFICAR COLUMNAS DEL MODELO
-        # =================================================
+        for variable in faltantes:
+            st.write(f"❌ {variable}")
 
-        st.subheader(
-            "🔎 Verificación de variables"
+    else:
+
+        st.success(
+            "Todas las variables necesarias están presentes."
         )
 
-        faltantes = [
-            variable
-            for variable in variables_modelo
-            if variable not in datos.columns
-        ]
+        st.write("Variables utilizadas por los modelos:")
 
+        st.code("\n".join(variables_modelo))
 
         # -------------------------------------------------
-        # SI FALTAN COLUMNAS
+        # PREPARAR DATOS
         # -------------------------------------------------
 
-        if faltantes:
+        X = preparar_datos(datos)
 
-            st.error(
-                "❌ El archivo no contiene todas las "
-                "variables necesarias para realizar "
-                "la predicción."
+        filas_validas = ~X.isnull().any(axis=1)
+
+        cantidad_invalidas = int((~filas_validas).sum())
+
+        if cantidad_invalidas > 0:
+
+            st.warning(
+                f"Se encontraron {cantidad_invalidas} filas "
+                "con variables incompletas o no numéricas. "
+                "Estas filas no se utilizarán para predecir."
             )
-
-            st.write(
-                "Variables faltantes:"
-            )
-
-            for variable in faltantes:
-
-                st.write(
-                    f"❌ {variable}"
-                )
-
-
-        # -------------------------------------------------
-        # SI ESTÁN TODAS LAS COLUMNAS
-        # -------------------------------------------------
-
-        else:
-
-            st.success(
-                "✅ Todas las variables necesarias "
-                "para el modelo están presentes."
-            )
-
-
-            # =================================================
-            # MOSTRAR VARIABLES UTILIZADAS
-            # =================================================
-
-            st.write(
-                "Variables utilizadas por los modelos:"
-            )
-
-            st.code(
-                "\n".join(variables_modelo)
-            )
-
-
-            # =================================================
-            # PREPARAR DATOS
-            # =================================================
-
-            X = datos[
-                variables_modelo
-            ].copy()
-
-
-            # -------------------------------------------------
-            # CONVERTIR A NUMÉRICO
-            # -------------------------------------------------
-
-            for columna in variables_modelo:
-
-                X[columna] = pd.to_numeric(
-                    X[columna],
-                    errors="coerce"
-                )
-
-
-            # =================================================
-            # VALORES FALTANTES
-            # =================================================
 
             faltantes_por_columna = X.isnull().sum()
+            faltantes_por_columna = faltantes_por_columna[
+                faltantes_por_columna > 0
+            ]
 
-            hay_faltantes = (
-                faltantes_por_columna.sum() > 0
-            )
+            st.write("Valores inválidos por variable:")
+            st.dataframe(faltantes_por_columna)
 
+        # -------------------------------------------------
+        # BOTÓN DE PREDICCIÓN
+        # -------------------------------------------------
 
-            if hay_faltantes:
+        if st.button(
+            "🔮 Realizar predicción",
+            type="primary",
+            key="predecir_archivo"
+        ):
 
-                st.warning(
-                    "⚠️ Algunas filas contienen "
-                    "valores faltantes en las variables "
-                    "utilizadas por el modelo."
+            X_validos = X.loc[filas_validas].copy()
+
+            if X_validos.empty:
+
+                st.error(
+                    "No existen registros completos para "
+                    "realizar la predicción."
                 )
 
-                st.write(
-                    faltantes_por_columna[
-                        faltantes_por_columna > 0
-                    ]
-                )
+            else:
 
-                st.info(
-                    "Las filas incompletas no serán utilizadas "
-                    "para realizar la predicción."
-                )
-
-
-            # =================================================
-            # BOTÓN DE PREDICCIÓN
-            # =================================================
-
-            if st.button(
-                "🔮 Realizar predicción",
-                type="primary"
-            ):
-
-                # -------------------------------------------------
-                # FILAS COMPLETAS
-                # -------------------------------------------------
-
-                filas_validas = ~X.isnull().any(axis=1)
-
-                X_validos = X[
-                    filas_validas
-                ].copy()
-
-
-                # -------------------------------------------------
-                # COMPROBAR QUE HAYA DATOS
-                # -------------------------------------------------
-
-                if len(X_validos) == 0:
-
-                    st.error(
-                        "❌ No existen registros completos "
-                        "para realizar la predicción."
-                    )
-
-                else:
-
-                    # =================================================
+                try:
+                    # -------------------------------------
                     # NORMALIZAR
-                    # =================================================
+                    # -------------------------------------
 
-                    X_normalizado = scaler.transform(
-                        X_validos
-                    )
+                    X_normalizado = scaler.transform(X_validos)
 
-
-                    # =================================================
-                    # PREDICCIÓN HEATING
-                    # =================================================
+                    # -------------------------------------
+                    # PREDICCIONES
+                    # -------------------------------------
 
                     heating_pred = modelo_heating.predict(
                         X_normalizado
                     )
 
-
-                    # =================================================
-                    # PREDICCIÓN COOLING
-                    # =================================================
-
                     cooling_pred = modelo_cooling.predict(
                         X_normalizado
                     )
 
-
-                    # =================================================
+                    # -------------------------------------
                     # CREAR RESULTADOS
-                    # =================================================
+                    # -------------------------------------
 
-                    resultados = datos[
+                    resultados = datos.loc[
                         filas_validas
                     ].copy()
 
+                    resultados["Heating_Load_Predicho"] = (
+                        heating_pred
+                    )
 
-                    resultados[
-                        "Heating_Load_Predicho"
-                    ] = heating_pred
+                    resultados["Cooling_Load_Predicho"] = (
+                        cooling_pred
+                    )
 
+                    resultados["Total_Load_Predicho"] = (
+                        resultados["Heating_Load_Predicho"]
+                        + resultados["Cooling_Load_Predicho"]
+                    )
 
-                    resultados[
-                        "Cooling_Load_Predicho"
-                    ] = cooling_pred
+                    # -------------------------------------
+                    # COMPROBAR CARGAS REALES
+                    # -------------------------------------
 
-
-                    # =================================================
-                    # TOTAL LOAD REAL
-                    # =================================================
-
-                    if (
+                    tiene_heating_real = (
                         "Heating_Load" in resultados.columns
-                        and
+                    )
+
+                    tiene_cooling_real = (
                         "Cooling_Load" in resultados.columns
-                    ):
+                    )
+
+                    if tiene_heating_real:
+
+                        resultados["Heating_Load"] = pd.to_numeric(
+                            resultados["Heating_Load"],
+                            errors="coerce"
+                        )
+
+                        resultados["Error_Heating"] = (
+                            resultados["Heating_Load"]
+                            - resultados["Heating_Load_Predicho"]
+                        )
+
+                    if tiene_cooling_real:
+
+                        resultados["Cooling_Load"] = pd.to_numeric(
+                            resultados["Cooling_Load"],
+                            errors="coerce"
+                        )
+
+                        resultados["Error_Cooling"] = (
+                            resultados["Cooling_Load"]
+                            - resultados["Cooling_Load_Predicho"]
+                        )
+
+                    if tiene_heating_real and tiene_cooling_real:
 
                         resultados["Total_Load"] = (
-                            pd.to_numeric(
-                                resultados["Heating_Load"],
-                                errors="coerce"
-                            )
-                            +
-                            pd.to_numeric(
-                                resultados["Cooling_Load"],
-                                errors="coerce"
-                            )
+                            resultados["Heating_Load"]
+                            + resultados["Cooling_Load"]
                         )
 
+                    # -------------------------------------
+                    # MOSTRAR RESULTADOS
+                    # -------------------------------------
 
-                    # =================================================
-                    # TOTAL LOAD PREDICHO
-                    # =================================================
-
-                    resultados[
-                        "Total_Load_Predicho"
-                    ] = (
-                        resultados[
-                            "Heating_Load_Predicho"
-                        ]
-                        +
-                        resultados[
-                            "Cooling_Load_Predicho"
-                        ]
-                    )
-
-
-                    # =================================================
-                    # COMPARAR CON VALORES REALES
-                    # =================================================
-
-                    if (
-                        "Heating_Load" in resultados.columns
-                        and
-                        "Cooling_Load" in resultados.columns
-                    ):
-
-                        resultados[
-                            "Error_Heating"
-                        ] = (
-                            pd.to_numeric(
-                                resultados["Heating_Load"],
-                                errors="coerce"
-                            )
-                            -
-                            resultados[
-                                "Heating_Load_Predicho"
-                            ]
-                        )
-
-
-                        resultados[
-                            "Error_Cooling"
-                        ] = (
-                            pd.to_numeric(
-                                resultados["Cooling_Load"],
-                                errors="coerce"
-                            )
-                            -
-                            resultados[
-                                "Cooling_Load_Predicho"
-                            ]
-                        )
-
-
-                    # =================================================
-                    # RESULTADOS
-                    # =================================================
-
-                    st.subheader(
-                        "📊 Resultados de la predicción"
-                    )
+                    st.subheader("📊 Resultados de la predicción")
 
                     st.dataframe(
                         resultados,
                         use_container_width=True
                     )
 
+                    # -------------------------------------
+                    # MÉTRICAS DE EVALUACIÓN
+                    # -------------------------------------
 
-                    # =================================================
-                    # MÉTRICAS
-                    # =================================================
-
-                    if (
-                        "Heating_Load" in resultados.columns
-                        and
-                        "Cooling_Load" in resultados.columns
-                    ):
-
-                        heating_real = pd.to_numeric(
-                            resultados["Heating_Load"],
-                            errors="coerce"
-                        )
-
-                        cooling_real = pd.to_numeric(
-                            resultados["Cooling_Load"],
-                            errors="coerce"
-                        )
-
-                        # -----------------------------------------
-                        # MAE
-                        # -----------------------------------------
-
-                        heating_mae = mean_absolute_error(
-                            heating_real,
-                            heating_pred
-                        )
-
-                        cooling_mae = mean_absolute_error(
-                            cooling_real,
-                            cooling_pred
-                        )
-
-
-                        # -----------------------------------------
-                        # RMSE
-                        # -----------------------------------------
-
-                        heating_rmse = np.sqrt(
-                            mean_squared_error(
-                                heating_real,
-                                heating_pred
-                            )
-                        )
-
-                        cooling_rmse = np.sqrt(
-                            mean_squared_error(
-                                cooling_real,
-                                cooling_pred
-                            )
-                        )
-
-
-                        # =================================================
-                        # MOSTRAR MÉTRICAS
-                        # =================================================
+                    if tiene_heating_real or tiene_cooling_real:
 
                         st.subheader(
                             "📈 Evaluación de las predicciones"
                         )
 
-
                         col1, col2 = st.columns(2)
-
 
                         with col1:
 
-                            st.markdown(
-                                "### 🔥 Heating Load"
-                            )
+                            st.markdown("### 🔥 Heating Load")
 
-                            st.metric(
-                                "MAE",
-                                f"{heating_mae:.2f}"
-                            )
+                            if tiene_heating_real:
 
-                            st.metric(
-                                "RMSE",
-                                f"{heating_rmse:.2f}"
-                            )
+                                metricas = calcular_metricas(
+                                    resultados["Heating_Load"],
+                                    heating_pred
+                                )
 
+                                if metricas is not None:
+
+                                    mae, rmse, n = metricas
+
+                                    st.metric("MAE", f"{mae:.2f}")
+                                    st.metric("RMSE", f"{rmse:.2f}")
+
+                                    st.caption(
+                                        f"Registros evaluados: {n}"
+                                    )
+
+                                else:
+                                    st.warning(
+                                        "No hay valores reales válidos "
+                                        "para evaluar calefacción."
+                                    )
+
+                            else:
+                                st.info(
+                                    "El archivo no contiene "
+                                    "Heating_Load real."
+                                )
 
                         with col2:
 
-                            st.markdown(
-                                "### ❄️ Cooling Load"
-                            )
+                            st.markdown("### ❄️ Cooling Load")
 
-                            st.metric(
-                                "MAE",
-                                f"{cooling_mae:.2f}"
-                            )
+                            if tiene_cooling_real:
 
-                            st.metric(
-                                "RMSE",
-                                f"{cooling_rmse:.2f}"
-                            )
+                                metricas = calcular_metricas(
+                                    resultados["Cooling_Load"],
+                                    cooling_pred
+                                )
 
+                                if metricas is not None:
 
-                    # =================================================
+                                    mae, rmse, n = metricas
+
+                                    st.metric("MAE", f"{mae:.2f}")
+                                    st.metric("RMSE", f"{rmse:.2f}")
+
+                                    st.caption(
+                                        f"Registros evaluados: {n}"
+                                    )
+
+                                else:
+                                    st.warning(
+                                        "No hay valores reales válidos "
+                                        "para evaluar refrigeración."
+                                    )
+
+                            else:
+                                st.info(
+                                    "El archivo no contiene "
+                                    "Cooling_Load real."
+                                )
+
+                    else:
+
+                        st.info(
+                            "El archivo no contiene las columnas "
+                            "de demanda real. Se mostrarán las "
+                            "predicciones sin métricas de evaluación."
+                        )
+
+                    # -------------------------------------
                     # DESCARGAR RESULTADOS
-                    # =================================================
+                    # -------------------------------------
 
-                    st.subheader(
-                        "📥 Descargar resultados"
-                    )
-
+                    st.subheader("📥 Descargar resultados")
 
                     csv_resultados = resultados.to_csv(
-                        index=False,
-                        encoding="utf-8-sig"
-                    )
-
+                        index=False
+                    ).encode("utf-8-sig")
 
                     st.download_button(
                         label="⬇️ Descargar CSV",
                         data=csv_resultados,
                         file_name="predicciones_resultado.csv",
                         mime="text/csv"
+                    )
+
+                except (ValueError, TypeError, AttributeError) as e:
+
+                    st.error(
+                        "Ocurrió un error al preparar los datos "
+                        f"o ejecutar los modelos: {e}"
                     )
 
 
@@ -573,13 +490,9 @@ st.divider()
 # PREDICCIÓN MANUAL
 # =========================================================
 
-st.subheader(
-    "✏️ Evaluar un edificio manualmente"
-)
-
+st.subheader("✏️ Evaluar un edificio manualmente")
 
 col1, col2 = st.columns(2)
-
 
 with col1:
 
@@ -591,7 +504,6 @@ with col1:
         step=0.01
     )
 
-
     surface_area = st.number_input(
         "Surface Area",
         min_value=0.0,
@@ -599,14 +511,12 @@ with col1:
         step=1.0
     )
 
-
     wall_area = st.number_input(
         "Wall Area",
         min_value=0.0,
         value=335.0,
         step=1.0
     )
-
 
 with col2:
 
@@ -616,7 +526,6 @@ with col2:
         value=5.3,
         step=0.1
     )
-
 
     glazing_area = st.number_input(
         "Glazing Area",
@@ -628,99 +537,74 @@ with col2:
 
 
 # =========================================================
-# PREDICCIÓN MANUAL
+# EJECUTAR PREDICCIÓN MANUAL
 # =========================================================
 
 if st.button(
-    "🔮 Predecir edificio"
+    "🔮 Predecir edificio",
+    type="primary",
+    key="predecir_manual"
 ):
 
     datos_manual = pd.DataFrame({
-
-        "Relative_Compactness": [
-            relative_compactness
-        ],
-
-        "Surface_Area": [
-            surface_area
-        ],
-
-        "Wall_Area": [
-            wall_area
-        ],
-
-        "Overall_Height": [
-            overall_height
-        ],
-
-        "Glazing_Area": [
-            glazing_area
-        ]
-
+        "Relative_Compactness": [relative_compactness],
+        "Surface_Area": [surface_area],
+        "Wall_Area": [wall_area],
+        "Overall_Height": [overall_height],
+        "Glazing_Area": [glazing_area]
     })
 
+    try:
 
-    # -----------------------------------------------------
-    # NORMALIZAR
-    # -----------------------------------------------------
+        # ---------------------------------------------
+        # NORMALIZAR
+        # ---------------------------------------------
 
-    datos_normalizado = scaler.transform(
-        datos_manual
-    )
+        datos_normalizado = scaler.transform(datos_manual)
 
+        # ---------------------------------------------
+        # PREDICCIONES
+        # ---------------------------------------------
 
-    # -----------------------------------------------------
-    # PREDICCIONES
-    # -----------------------------------------------------
+        heating_pred = float(
+            modelo_heating.predict(datos_normalizado)[0]
+        )
 
-    heating_pred = modelo_heating.predict(
-        datos_normalizado
-    )[0]
+        cooling_pred = float(
+            modelo_cooling.predict(datos_normalizado)[0]
+        )
 
+        total_pred = heating_pred + cooling_pred
 
-    cooling_pred = modelo_cooling.predict(
-        datos_normalizado
-    )[0]
+        # ---------------------------------------------
+        # MOSTRAR RESULTADOS
+        # ---------------------------------------------
 
+        st.subheader("📊 Resultado de la predicción")
 
-    total_pred = (
-        heating_pred
-        +
-        cooling_pred
-    )
+        col1, col2, col3 = st.columns(3)
 
-
-    # =====================================================
-    # MOSTRAR RESULTADOS
-    # =====================================================
-
-    st.subheader(
-        "📊 Resultado"
-    )
-
-
-    col1, col2, col3 = st.columns(3)
-
-
-    with col1:
-
-        st.metric(
+        col1.metric(
             "🔥 Heating Load",
             f"{heating_pred:.2f}"
         )
 
-
-    with col2:
-
-        st.metric(
+        col2.metric(
             "❄️ Cooling Load",
             f"{cooling_pred:.2f}"
         )
 
-
-    with col3:
-
-        st.metric(
+        col3.metric(
             "⚡ Total Load",
             f"{total_pred:.2f}"
+        )
+
+        st.success(
+            "Predicción realizada correctamente."
+        )
+
+    except (ValueError, TypeError, AttributeError) as e:
+
+        st.error(
+            f"No se pudo realizar la predicción manual: {e}"
         )
